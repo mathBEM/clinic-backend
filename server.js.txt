@@ -1,0 +1,79 @@
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
+const cors = require('cors');
+const jwt = require('jsonwebtoken');
+const bcrypt = require('bcrypt');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+const server = http.createServer(app);
+const io = new Server(server, {
+    cors: { origin: "*" }
+});
+
+// بيانات وهمية مؤقتة (يمكن ربطها بقاعدة بيانات لاحقاً)
+let clinicState = {
+    currentPatient: { name: "لا يوجد حالياً" },
+    waitingList: []
+};
+
+// بيانات الطبيب المشرف
+const JWT_SECRET = "super_secret_clinic_key_2026";
+
+// مسار تسجيل دخول الطبيب (RBAC Authentication)
+app.post('/api/auth/login', async (req, res) => {
+    const { username, password } = req.body;
+    if (username === "dr_admin" && password === "clinic2026") {
+        const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: '8h' });
+        return res.json({ token });
+    }
+    res.status(401).json({ error: "اسم المستخدم أو كلمة المرور غير صحيحة" });
+});
+
+// مسار حجز موعد للمريض (عام)
+app.post('/api/patients/book', (req, res) => {
+    const { patientName } = req.body;
+    if (!patientName) return res.status(400).json({ error: "اسم المريض مطلوب" });
+    
+    const newPatient = {
+        name: patientName,
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
+    
+    clinicState.waitingList.push(newPatient);
+    io.emit('updateQueue', clinicState);
+    res.status(200).json({ success: true, message: "تم الحجز بنجاح" });
+});
+
+// مسار استدعاء المريض التالي (خاص بالطبيب المحمي بـ JWT)
+app.post('/api/doctor/next', (req, res) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    
+    if (!token) return res.status(401).json({ error: "غير مرخص" });
+
+    jwt.verify(token, JWT_SECRET, (err, user) => {
+        if (err) return res.status(403).json({ error: "الجلسة منتهية أو غير صالحة" });
+
+        if (clinicState.waitingList.length > 0) {
+            clinicState.currentPatient = clinicState.waitingList.shift();
+        } else {
+            clinicState.currentPatient = { name: "لا يوجد منتظرين" };
+        }
+        
+        io.emit('updateQueue', clinicState);
+        res.json({ success: true, currentPatient: clinicState.currentPatient });
+    });
+});
+
+io.on('connection', (socket) => {
+    socket.emit('updateQueue', clinicState);
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+});
